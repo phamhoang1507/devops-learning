@@ -1,0 +1,12 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: hello-world-backend
+
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped

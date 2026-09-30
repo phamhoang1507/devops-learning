@@ -1,0 +1,207 @@
+# docker-compose.yml là file "nhạc trưởng" - nó không chạy code,
+# nó chỉ ra lệnh cho Docker: "tạo container nào, từ image gì, nối mạng ra sao"
+services:              # Khai báo danh sách các "dịch vụ" (container) sẽ chạy
+                        # Ở đây có 3 service: db, be, web - chạy như 3 máy tính riêng biệt
+                        # nhưng nằm chung 1 mạng nội bộ do Docker Compose tự tạo
+
+  # ========================= SERVICE 1: DATABASE =========================
+  db:                                     # Tên service (dùng để các service khác gọi tới, vd "db:3306")
+    container_name: myapptest-db          # Tên hiển thị của container khi gõ "docker ps"
+    image: mysql:8                        # Dùng thẳng image MySQL bản 8 có sẵn trên Docker Hub
+                                           # (không cần code gì thêm, MySQL đã là 1 phần mềm hoàn chỉnh)
+    restart: unless-stopped               # Nếu container bị crash/máy reboot -> tự khởi động lại
+                                           # (trừ khi bạn chủ động "docker compose stop")
+    ports:
+      - "1300:3306"                       # Map cổng: "cổng_ngoài_máy_bạn : cổng_trong_container"
+                                           # -> Từ máy thật, bạn nối MySQL qua "localhost:1300"
+                                           # -> Nhưng CÁC CONTAINER KHÁC (như be) vẫn nối qua "db:3306"
+                                           #    (cổng gốc bên trong, không phải 1300)
+    environment:                          # Biến môi trường - image mysql:8 đọc các biến này
+                                           # để tự tạo user/database lúc khởi động lần đầu
+      - MYSQL_ROOT_PASSWORD=root          # Mật khẩu user root (toàn quyền)
+      - MYSQL_USER=appuser                # Tạo sẵn 1 user thường tên "appuser"
+      - MYSQL_PASSWORD=apppass            # Mật khẩu của appuser
+      - MYSQL_DATABASE=appdb              # Tự tạo sẵn 1 database rỗng tên "appdb"
+    volumes:
+      - ./db:/var/lib/mysql               # Gắn thư mục "./db" ở máy thật vào chỗ MySQL lưu data
+                                           # -> Data KHÔNG mất khi container bị xoá/tạo lại
+                                           # (nếu không có dòng này, xoá container là mất sạch data)
+    healthcheck:                          # Cách Docker tự kiểm tra "MySQL đã sẵn sàng nhận kết nối chưa"
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+                                           # Lệnh test: thử ping MySQL bằng chính client mysqladmin
+      interval: 5s                        # Cứ 5 giây kiểm tra 1 lần
+      timeout: 5s                         # Mỗi lần kiểm tra chờ tối đa 5 giây
+      retries: 10                         # Thử tối đa 10 lần mới báo "unhealthy"
+                                           # -> Mục đích: để service "be" biết lúc nào nên bắt đầu kết nối,
+                                           #    tránh bị "Connection refused" vì MySQL chưa kịp khởi động xong
+
+  # ========================= SERVICE 2: BACKEND API =========================
+  be:                                     # Tên service backend (API)
+    container_name: myapptest-be
+    image: python:3.12-slim               # Dùng image Python trần (chỉ có Python, chưa có Flask/FastAPI)
+                                           # vì mình không viết Dockerfile riêng, nên phải tự cài thư viện
+                                           # và tự tạo code Python ngay trong phần "command" bên dưới
+    ports:
+      - "8000:8000"                       # Máy thật gọi API qua "localhost:8000"
+    environment:                          # Các biến để code Python bên dưới đọc bằng os.getenv(...)
+      - DB_HOST=db                        # "db" chính là TÊN SERVICE ở trên -> Docker tự phân giải
+                                           # thành địa chỉ IP nội bộ của container MySQL (giống như DNS)
+      - DB_PORT=3306                      # Cổng GỐC bên trong container MySQL (không phải 1300)
+      - DB_USER=appuser
+      - DB_PASSWORD=apppass
+      - DB_NAME=appdb
+    depends_on:
+      db:
+        condition: service_healthy        # Bắt "be" phải CHỜ "db" healthcheck báo "healthy" mới được start
+                                           # (khác với "depends_on: db" trơn - cái đó chỉ chờ container
+                                           #  db START, chứ không chờ MySQL bên trong SẴN SÀNG)
+    command:                              # Ghi đè lệnh chạy mặc định của image python:3.12-slim
+      - sh                                # Chạy bằng shell (sh)
+      - -c                                # "-c" nghĩa là: chạy đoạn script phía sau như 1 chuỗi lệnh
+      - |                                 # Dấu "|" = chuỗi nhiều dòng, giữ nguyên xuống dòng bên dưới
+        set -e
+        # Cài các thư viện Python cần thiết (làm MỖI LẦN container khởi động,
+        # vì không có Dockerfile để cài sẵn từ trước - đây là điểm yếu của cách gộp 1 file)
+        pip install --quiet fastapi "uvicorn[standard]" sqlalchemy pymysql cryptography
+        mkdir -p /tmp/app && cd /tmp/app
+        # Ghi toàn bộ code Python bên dưới ra thành file main.py thật sự trong container
+        # "cat > main.py << 'PYEOF' ... PYEOF" là cú pháp heredoc của shell:
+        # mọi thứ giữa 2 dòng PYEOF sẽ được coi là nội dung văn bản, đổ thẳng vào file main.py
+        cat > main.py << 'PYEOF'
+        import os, time
+        from fastapi import FastAPI
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.exc import OperationalError
+
+        # Đọc các biến môi trường đã khai báo ở "environment:" phía trên
+        DB_HOST = os.getenv("DB_HOST", "db")
+        DB_PORT = os.getenv("DB_PORT", "3306")
+        DB_USER = os.getenv("DB_USER", "appuser")
+        DB_PASSWORD = os.getenv("DB_PASSWORD", "apppass")
+        DB_NAME = os.getenv("DB_NAME", "appdb")
+        # Ghép thành chuỗi kết nối (connection string) mà SQLAlchemy hiểu được
+        DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+        app = FastAPI(title="MyApp Backend API")   # Khởi tạo app FastAPI
+        engine = None                              # Biến toàn cục giữ kết nối DB (lazy init)
+
+        def get_engine():
+            # Hàm này tạo kết nối DB, có RETRY vì lúc mới start MySQL có thể
+            # chưa nhận kết nối kịp dù healthcheck đã báo "healthy"
+            global engine
+            if engine is not None:
+                return engine                      # Nếu đã kết nối rồi thì dùng lại, khỏi tạo mới
+            for _ in range(10):                    # Thử tối đa 10 lần
+                try:
+                    eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+                    with eng.connect() as conn:
+                        conn.execute(text("SELECT 1"))   # Test thử 1 câu lệnh SQL đơn giản
+                    engine = eng
+                    return engine
+                except OperationalError:
+                    time.sleep(2)                  # Không kết nối được thì đợi 2 giây rồi thử lại
+            raise RuntimeError("Khong the ket noi MySQL")
+
+        @app.on_event("startup")                   # Đoạn này chạy 1 LẦN DUY NHẤT khi app khởi động
+        def on_startup():
+            eng = get_engine()
+            with eng.connect() as conn:
+                conn.execute(text(                 # Tự tạo bảng "items" nếu chưa có
+                    "CREATE TABLE IF NOT EXISTS items ("
+                    "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL)"
+                ))
+                conn.commit()
+
+        @app.get("/")                              # Định nghĩa API: GET http://be:8000/
+        def root():
+            return {"message": "FastAPI backend dang chay"}   # Trả JSON
+
+        @app.get("/items")                         # API: GET /items -> lấy toàn bộ item trong DB
+        def list_items():
+            eng = get_engine()
+            with eng.connect() as conn:
+                rows = conn.execute(text("SELECT id, name FROM items")).fetchall()
+            return {"items": [{"id": r[0], "name": r[1]} for r in rows]}
+
+        @app.post("/items")                        # API: POST /items?name=... -> thêm 1 item mới
+        def add_item(name: str):
+            eng = get_engine()
+            with eng.connect() as conn:
+                conn.execute(text("INSERT INTO items (name) VALUES (:name)"), {"name": name})
+                conn.commit()
+            return {"message": f"Da them item: {name}"}
+        PYEOF
+        # Sau khi file main.py đã được tạo xong, chạy server uvicorn để "phục vụ" app FastAPI đó
+        # "main:app" nghĩa là: mở file main.py, tìm biến tên "app" (chính là FastAPI(...) ở trên)
+        uvicorn main:app --host 0.0.0.0 --port 8000
+
+  # ========================= SERVICE 3: WEB (GIAO DIỆN) =========================
+  web:
+    container_name: myapptest-web
+    image: python:3.12-slim
+    ports:
+      - "5000:5000"                       # Máy thật mở giao diện qua "localhost:5000"
+    environment:
+      - BE_API_URL=http://be:8000         # Địa chỉ để "web" gọi sang "be"
+                                           # "be" ở đây LẠI LÀ TÊN SERVICE, không phải "localhost"
+                                           # vì "web" và "be" là 2 container riêng biệt,
+                                           # "localhost" trong container "web" chỉ trỏ về CHÍNH nó thôi
+    depends_on:
+      - be                                 # Chờ container "be" START xong mới start "web"
+                                           # (lưu ý: chỉ chờ START, không chờ FastAPI bên trong
+                                           #  cài xong thư viện + mở cổng -> đây là lý do đôi khi
+                                           #  bạn vẫn gặp "Connection refused" nếu load trang quá sớm)
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        pip install --quiet flask requests    # Cài Flask (web) + requests (để gọi API sang "be")
+        mkdir -p /tmp/app && cd /tmp/app
+        cat > app.py << 'PYEOF'
+        import os
+        import requests
+        from flask import Flask, request, redirect, url_for
+
+        app = Flask(__name__)
+        BE_API_URL = os.getenv("BE_API_URL", "http://be:8000")
+
+        @app.route("/")                              # Trang chủ: GET http://localhost:5000/
+        def index():
+            items, error = [], None
+            try:
+                # Gọi sang backend để lấy danh sách item
+                resp = requests.get(f"{BE_API_URL}/items", timeout=5)
+                resp.raise_for_status()               # Nếu be trả lỗi (vd 500) thì raise exception
+                items = resp.json().get("items", [])
+            except requests.RequestException as exc:
+                # Nếu gọi be thất bại (vd be chưa chạy xong) -> lưu lỗi lại để hiển thị lên web
+                # (đây chính là dòng "HTTPConnectionPool..." bạn thấy khi be chưa kịp start)
+                error = str(exc)
+            rows = "".join(f"<li>#{i['id']} - {i['name']}</li>" for i in items) or "<li>Chua co item</li>"
+            err_html = f"<p style='color:red'>{error}</p>" if error else ""
+            # Trả thẳng HTML dạng chuỗi (không dùng file template riêng cho gọn)
+            return f"""
+            <h1>Danh sach Items</h1>
+            {err_html}
+            <ul>{rows}</ul>
+            <form method='post' action='/add'>
+              <input name='name' placeholder='Ten item moi' required>
+              <button type='submit'>Them</button>
+            </form>
+            """
+
+        @app.route("/add", methods=["POST"])         # Xử lý khi bấm nút "Them" trên form
+        def add_item():
+            name = request.form.get("name", "").strip()
+            if name:
+                try:
+                    requests.post(f"{BE_API_URL}/items", params={"name": name}, timeout=5)
+                except requests.RequestException:
+                    pass                               # Lỗi thì bỏ qua, không crash cả trang
+            return redirect(url_for("index"))          # Xong thì quay lại trang chủ để thấy item mới
+
+        if __name__ == "__main__":
+            app.run(host="0.0.0.0", port=5000)         # Chạy Flask server, lắng nghe mọi địa chỉ IP
+        PYEOF
+        python app.py                                  # Chạy file app.py vừa tạo
