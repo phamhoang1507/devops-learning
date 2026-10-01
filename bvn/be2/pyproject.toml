@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "hello-world-backend"
+version = "1.0.0"
+description = "Hello World FastAPI backend"
+authors = ["Hoang"]
+
+[tool.poetry.dependencies]
+python = ">=3.14,<3.15"
+fastapi = "^0.116.0"
+uvicorn = { extras = ["standard"], version = "^0.35.0" }
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
