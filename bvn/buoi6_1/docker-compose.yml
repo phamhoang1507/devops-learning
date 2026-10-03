@@ -1,0 +1,10 @@
+services:
+  web:
+    container_name: buoi6_1_web
+    image: node:25
+    working_dir: /app/web
+    volumes:
+      - ./web:/app/web
+    ports: 
+      - 5000:5173
+    command: ["npm", "run", "dev", "--", "--host"]
