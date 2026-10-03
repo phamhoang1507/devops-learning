@@ -9,6 +9,7 @@ function App() {
 
   return (
     <>
+      Build APP with Vite + React + Docker + VPS + GIT
     </>
   )
 }
